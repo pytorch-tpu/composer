@@ -41,6 +41,10 @@ from composer.utils.misc import is_model_deepspeed, partial_format
 from composer.utils.object_store import ObjectStore
 from composer.utils.retrying import retry
 
+from composer.utils.device import is_xla_installed
+if is_xla_installed():
+    import torch_xla.core.xla_model as xm
+
 if TYPE_CHECKING:
     from composer.core import AlgorithmPass, State
     from composer.loggers import Logger, LoggerDestination
@@ -1164,7 +1168,10 @@ def _write_checkpoint_file(state_dict: Dict[str, Any], filename: str) -> None:
 
         with tempfile.TemporaryDirectory(prefix='checkpoint') as tmpdir:
             with open(os.path.join(tmpdir, _COMPOSER_STATES_FILENAME), 'wb') as f:
-                torch.save(state_dict, f)
+                if is_xla_installed():
+                    xm.save(state_dict, f)
+                else:
+                    torch.save(state_dict, f)
 
             with tarfile.open(filename, write_mode) as tarball:
                 tarball.add(tmpdir, arcname='')
@@ -1173,12 +1180,18 @@ def _write_checkpoint_file(state_dict: Dict[str, Any], filename: str) -> None:
         log.debug('Writing compressed checkpoint %s', filename)
         compressor = get_compressor(filename)
         with compressor.compress(filename) as f:
-            torch.save(state_dict, f)
+            if is_xla_installed():
+                xm.save(state_dict, f)
+            else:
+                torch.save(state_dict, f)
 
     else:
         log.debug('Writing uncompressed checkpoint %s', filename)
         with open(filename, 'wb') as f:
-            torch.save(state_dict, f)
+            if is_xla_installed():
+                xm.save(state_dict, f)
+            else:
+                torch.save(state_dict, f)
 
 
 def _save_deepspeed_model(model, filename: str):

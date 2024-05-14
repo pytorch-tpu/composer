@@ -51,6 +51,7 @@ from composer.utils.device import get_device, is_hpu_installed, is_xla_installed
 
 if is_xla_installed():
     import torch_xla
+    import torch_xla.core.xla_model as xm
 
 if TYPE_CHECKING:
     from composer.devices import Device
@@ -327,7 +328,10 @@ def all_reduce(
     """
     if dist.is_available() and dist.is_initialized():
         reduce_op = getattr(dist.ReduceOp, reduce_operation.upper())
-        dist.all_reduce(tensor, op=reduce_op, group=group)
+        if is_xla_installed():
+            xm.all_reduce(reduce_operation.lower(), tensor, groups=group)
+        else:
+            dist.all_reduce(tensor, op=reduce_op, group=group)
         return
     world_size = get_world_size()
     if world_size == 1:
@@ -420,8 +424,12 @@ def all_gather(tensor: torch.Tensor, group=None) -> Sequence[torch.Tensor]:
     """
     if dist.is_available() and dist.is_initialized():
         obj_gather_list = [torch.zeros_like(tensor) for _ in range(get_world_size())]
-        dist.all_gather(obj_gather_list, tensor, group=group)
-        return obj_gather_list
+        if is_xla_installed():
+            obj_gathered = xm.all_gather(tensor, obj_gather_list, groups=group)
+            return obj_gathered
+        else:
+            dist.all_gather(obj_gather_list, tensor, group=group)
+            return obj_gather_list
     world_size = get_world_size()
     if world_size == 1:
         return [tensor]

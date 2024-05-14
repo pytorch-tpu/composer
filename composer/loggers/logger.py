@@ -16,6 +16,10 @@ import torch
 
 from composer.utils import ensure_tuple, format_name_with_dist
 
+from composer.utils.device import is_xla_installed
+if is_xla_installed():
+    
+
 if TYPE_CHECKING:
     from composer.core import State
     from composer.loggers.logger_destination import LoggerDestination
@@ -183,7 +187,11 @@ def format_log_data_value(data: Any) -> str:
         return f'{data:.4f}'
     if isinstance(data, torch.Tensor):
         if data.shape == () or reduce(operator.mul, data.shape, 1) == 1:
-            return format_log_data_value(data.cpu().item())
+            if is_xla_installed():
+                return 'Tensor of shape ' + str(data.shape)
+            else:
+                return format_log_data_value(data.cpu().item())
+        
         return 'Tensor of shape ' + str(data.shape)
     if isinstance(data, collections.abc.Mapping):
         output = ['{ ']

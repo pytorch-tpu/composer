@@ -132,6 +132,15 @@ from composer.utils.object_store.mlflow_object_store import MLFLOW_EXPERIMENT_ID
 if is_xla_installed():
     import torch_xla.core.xla_model as xm
     import torch_xla.distributed.parallel_loader as pl
+    import torch_xla
+    # Debugging only
+    import torch_xla.debug.metrics as met
+    # Print all available metrics here
+    # Only metrics with at least one sample appear here
+    # i.e. it will return empty if no IR graph has been created this
+    met.metric_names()
+    # Print all available counters
+    met.counter_names()
 
 log = logging.getLogger(__name__)
 
@@ -1431,8 +1440,9 @@ class Trainer:
             'node_name': os.environ.get('NODENAME', 'unknown because NODENAME environment variable not set'),
         })
 
-        if not isinstance(self.state.model, ComposerModel):
-            raise ValueError('Provided model must be a subclass of ComposerModel.')
+        if not is_xla_installed():
+            if not isinstance(self.state.model, ComposerModel):
+                raise ValueError('Provided model must be a subclass of ComposerModel.')
 
         # After running Event.INIT, then set the "optional" elements of state that could be passed in on FIT instead of INIT
         # Setting these attributes here ensures that algorithms do not depend on unavailable attributes during Event.INIT
@@ -2268,7 +2278,11 @@ class Trainer:
         # log computed metrics
         computed_metrics = {}
         for metric_name, metric in metrics.items():
-            computed_metrics[metric_name] = metric.compute()
+            if self.state.device.dist_backend == 'xla':
+                print(f"metric name = {metric_name}, metric = {metric}")
+                computed_metrics[metric_name] = metric
+            else:
+                computed_metrics[metric_name] = metric.compute()
 
         self.logger.log_metrics({f'metrics/{dataloader_label}/{name}': val for (name, val) in computed_metrics.items()
                                 },)
@@ -2439,13 +2453,14 @@ class Trainer:
                     self.state.scaler.update()
 
                 # total_loss_dict can be None if gradient scaling failed
-                if total_loss_dict is not None:  # pyright: ignore[reportUnnecessaryComparison]
-                    map_collection(total_loss_dict, dist.all_reduce)
-                    total_loss_dict = {
-                        k: loss.cpu().item() / dist.get_world_size() for k, loss in total_loss_dict.items()
-                    }
-                    self.state.total_loss_dict = total_loss_dict
-                    self.logger.log_metrics(total_loss_dict)
+                if not is_xla_installed():
+                    if total_loss_dict is not None:  # pyright: ignore[reportUnnecessaryComparison]
+                        map_collection(total_loss_dict, dist.all_reduce)
+                        total_loss_dict = {
+                            k: loss.cpu().item() / dist.get_world_size() for k, loss in total_loss_dict.items()
+                        }
+                        self.state.total_loss_dict = total_loss_dict
+                        self.logger.log_metrics(total_loss_dict)
 
                 # The scheduler step.step() and compute_and_log_metrics() are going to be included in the
                 # next batch's wall clock time. The time accumulation must be done here so schedulers
@@ -2742,11 +2757,19 @@ class Trainer:
                 microbatch_loss_dict = self._train_microbatch(use_grad_scaling, current_batch_size, is_final_microbatch)
 
                 # Aggregate each loss in microbatch_loss_dict into total_loss_dict
-                for k, microbatch_loss in microbatch_loss_dict.items():
-                    loss_key = f'loss/train/{k}'
-                    if loss_key not in total_loss_dict:
-                        total_loss_dict[loss_key] = self.state.device.tensor_to_device(torch.zeros(size=(1,)))
-                    total_loss_dict[loss_key] += microbatch_loss
+                if self.state.device.dist_backend == 'xla':
+                    if is_final_microbatch:
+                        print (f"microbatch loss = {microbatch_loss_dict}")
+                    for k, microbatch_loss in microbatch_loss_dict.items():
+                        loss_key = f'loss/train/{k}'
+                        total_loss_dict[loss_key] = microbatch_loss
+                else:
+                    # Aggregate each loss in microbatch_loss_dict into total_loss_dict
+                    for k, microbatch_loss in microbatch_loss_dict.items():
+                        loss_key = f'loss/train/{k}'
+                        if loss_key not in total_loss_dict:
+                            total_loss_dict[loss_key] = self.state.device.tensor_to_device(torch.zeros(size=(1,)))
+                        total_loss_dict[loss_key] += microbatch_loss
 
             # Restore batch
             self.state.batch = current_batch
@@ -2878,9 +2901,13 @@ class Trainer:
             if self.state.deepspeed_enabled:
                 self.state.deepspeed_model.backward(microbatch_loss)
             else:
-                # Scale loss based on the number of samples in the microbatch to maintain gradient numerics
-                microbatch_loss.mul_(microbatch_num_samples / current_batch_size)
-                microbatch_loss.backward(create_graph=self._backwards_create_graph)
+                if is_xla_installed():
+                    microbatch_loss = microbatch_loss.sum()
+                    microbatch_loss.backward()
+                else:
+                    # Scale loss based on the number of samples in the microbatch to maintain gradient numerics
+                    microbatch_loss.mul_(microbatch_num_samples / current_batch_size)
+                    microbatch_loss.backward(create_graph=self._backwards_create_graph)
 
             if self.state.device.dist_backend == 'xla':
                 # For xla devices, the program between any pair of mark_steps() calls is compiled. With out this, the
