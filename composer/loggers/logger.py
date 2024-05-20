@@ -17,8 +17,6 @@ import torch
 from composer.utils import ensure_tuple, format_name_with_dist
 
 from composer.utils.device import is_xla_installed
-if is_xla_installed():
-    
 
 if TYPE_CHECKING:
     from composer.core import State

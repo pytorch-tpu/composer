@@ -444,9 +444,15 @@ def _distribute_and_get_random_seed(seed: Optional[int], device: Device):
         raise ValueError(f'Invalid seed: {seed}. It must be on [0; 2**32 - 1)')
 
     # using int64 to prevent overflow
-    rank_zero_seed = device.tensor_to_device(torch.tensor([seed], dtype=torch.int64))
+    if is_xla_installed():
+        dtpu = xm.xla_device()
+        rank_zero_seed = torch.tensor([seed], dtype=torch.int64).to(dtpu)
+    else:
+        rank_zero_seed = device.tensor_to_device(torch.tensor([seed], dtype=torch.int64))
+
     if dist.get_world_size() > 1:
         dist.broadcast(rank_zero_seed, src=0)
+
     rank_zero_seed = rank_zero_seed.item()
     assert isinstance(rank_zero_seed, int)
     seed = rank_zero_seed + dist.get_global_rank()
